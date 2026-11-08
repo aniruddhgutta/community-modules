@@ -1,0 +1,36 @@
+From d802fbac62dec6f0e06f8237373696e039b34ee9 Mon Sep 17 00:00:00 2001
+From: aniruddhgutta <aniruddhgutta@disroot.org>
+Date: Sun, 8 Nov 2026 19:10:27 +0530
+Subject: [PATCH 3/3] Run AUTO when power-profiles-daemon is not on the bus
+
+g_dbus_proxy_new_sync() succeeds for a well-known name with no owner, so
+with a system bus but no ppd connect_to_power_profile_daemon() reported
+success and lpmd_set_auto() was never called, leaving lpmd idle. Check the
+name owner and keep the signal connected so a later ppd still takes over.
+---
+ src/lpmd_proc.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/lpmd_proc.c b/src/lpmd_proc.c
+index 73a34ef..8f5c219 100644
+--- a/src/lpmd_proc.c
++++ b/src/lpmd_proc.c
+@@ -177,7 +177,14 @@ static int connect_to_power_profile_daemon(void)
+ 						 (GCallback)power_profiles_changed_cb,
+ 						 NULL);
+ 			power_profiles_changed_cb();
+-			return 0;
++
++			/*
++			 * The proxy is created even when nothing owns the name, so
++			 * "connected" doesn't mean ppd is there. Report failure to
++			 * make the caller run AUTO; a ppd that shows up later still
++			 * takes over through the signal above.
++			 */
++			return g_dbus_proxy_get_name_owner(power_profiles_daemon) ? 0 : 1;
+ 		}
+ 		lpmd_log_info("Could not setup DBus watch for power-profiles-daemon");
+ 	}
+-- 
+2.43.0
+

@@ -1,0 +1,217 @@
+From ee484919b85831ca74bd08a52902c290c5a9c42b Mon Sep 17 00:00:00 2001
+From: aniruddhgutta <aniruddhgutta@disroot.org>
+Date: Sun, 8 Nov 2026 19:09:36 +0530
+Subject: [PATCH 2/3] Add --without-libsystemd
+
+sd-bus is only used by Mode 0 (AllowedCPUs= on the systemd slices) and by
+process classification (transient scopes), both of which talk to the
+systemd manager. Add a configure switch that compiles that code out so
+systems without systemd can build without libsystemd. Mode 1 writes the
+cgroup files directly and is unaffected; Mode 0 then fails at init with a
+log message instead of failing to connect to a manager that isn't there.
+---
+ configure.ac         | 12 +++++++++---
+ src/lpmd_cgroup.c    | 26 +++++++++++++++++++++++++-
+ src/process_cpuset.c | 40 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 74 insertions(+), 4 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index 4dd6179..93f75eb 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -67,9 +67,15 @@ PKG_CHECK_MODULES([XML], [libxml-2.0 >= 2.4])
+ PKG_CHECK_MODULES([libnl30], [libnl-3.0], [libnl30=yes], [libnl30=no])
+ PKG_CHECK_MODULES([libnlgenl30], [libnl-genl-3.0], libnlgenl30=yes, libnlgenl30=no)
+ 
+-PKG_CHECK_MODULES([SYSTEMD], [libsystemd], [],
+-      [PKG_CHECK_MODULES([SYSTEMD], [libsystemd-daemon], [],
+-       [AC_MSG_ERROR([libsystemd support requested but not found])])])
++AC_ARG_WITH([libsystemd],
++	[AS_HELP_STRING([--without-libsystemd], [build without sd-bus, which is only needed by Mode 0 and process classification])],
++	[], [with_libsystemd=yes])
++AS_IF([test "x$with_libsystemd" != xno], [
++	PKG_CHECK_MODULES([SYSTEMD], [libsystemd], [],
++	      [PKG_CHECK_MODULES([SYSTEMD], [libsystemd-daemon], [],
++	       [AC_MSG_ERROR([libsystemd support requested but not found])])])
++	AC_DEFINE([HAVE_LIBSYSTEMD], [1], [Build with sd-bus support])
++])
+ 
+ PKG_CHECK_MODULES([UPOWER], [upower-glib])
+ 
+diff --git a/src/lpmd_cgroup.c b/src/lpmd_cgroup.c
+index 8869531..e387e6b 100644
+--- a/src/lpmd_cgroup.c
++++ b/src/lpmd_cgroup.c
+@@ -2,8 +2,10 @@
+ /* Copyright (C) 2026 Intel Corporation */
+ 
+ #define _GNU_SOURCE
+-#include <systemd/sd-bus.h>
+ #include "lpmd.h"
++#ifdef HAVE_LIBSYSTEMD
++#include <systemd/sd-bus.h>
++#endif
+ 
+ /* Support for LPM_CPU_CGROUPV2 */
+ #define PATH_CGROUP			"/sys/fs/cgroup"
+@@ -53,6 +55,7 @@ static void free_systemd_allowed_cpus_snapshot(void)
+ }
+ 
+ /* Read the exact byte-array value systemd currently exposes for one unit. */
++#ifdef HAVE_LIBSYSTEMD
+ static int read_allowed_cpus(const char *unit, uint8_t **values,
+ 				     size_t *size)
+ {
+@@ -124,6 +127,17 @@ finish:
+ 	}
+ 	return ret < 0 ? -1 : 0;
+ }
++#else
++static int read_allowed_cpus(const char *unit, uint8_t **values,
++				     size_t *size)
++{
++	(void)unit;
++	(void)values;
++	(void)size;
++	lpmd_log_info("Built without libsystemd, cannot read AllowedCPUs= (use Mode 1)\n");
++	return -1;
++}
++#endif
+ 
+ /*
+  * Snapshot AllowedCPUs= for the units this daemon may write.
+@@ -197,6 +211,7 @@ static int cgroup_cpuset_enabled(void)
+ 	return 0;
+ }
+ 
++#ifdef HAVE_LIBSYSTEMD
+ static int update_allowed_cpus(const char *unit, uint8_t *vals, int size)
+ {
+ 	sd_bus_error error = SD_BUS_ERROR_NULL;
+@@ -304,6 +319,15 @@ finish:
+ 
+ 	return ret < 0 ? -1 : 0;
+ }
++#else
++static int update_allowed_cpus(const char *unit, uint8_t *vals, int size)
++{
++	(void)unit;
++	(void)vals;
++	(void)size;
++	return -1;
++}
++#endif
+ 
+ /*
+  * Put AllowedCPUs= back exactly as it was found, for the units that were read
+diff --git a/src/process_cpuset.c b/src/process_cpuset.c
+index f5994c7..80eab3b 100644
+--- a/src/process_cpuset.c
++++ b/src/process_cpuset.c
+@@ -49,7 +49,9 @@
+ 
+ #include <libxml/parser.h>
+ #include <libxml/tree.h>
++#ifdef HAVE_LIBSYSTEMD
+ #include <systemd/sd-bus.h>
++#endif
+ 
+ #define MAX_NAME 64
+ #define MAX_CPULIST 256
+@@ -1467,6 +1469,7 @@ static int apply_pid_uclamp(process_cpuset_t *ctx, pid_t pid,
+  */
+ static void reset_failed_unit(const char *unit); /* fwd, defined below */
+ 
++#ifdef HAVE_LIBSYSTEMD
+ static int start_scope_for_pid(const char *unit, pid_t pid, const uint8_t *mask,
+ 			       size_t mask_len)
+ {
+@@ -1637,6 +1640,17 @@ out:
+ 	sd_bus_unref(bus);
+ 	return r < 0 ? -1 : 0;
+ }
++#else
++static int start_scope_for_pid(const char *unit, pid_t pid, const uint8_t *mask,
++			       size_t mask_len)
++{
++	(void)unit;
++	(void)pid;
++	(void)mask;
++	(void)mask_len;
++	return -1;
++}
++#endif
+ 
+ /* ---------- per-classification mask ---------- */
+ 
+@@ -1748,6 +1762,7 @@ static unsigned long long pid_start_time(pid_t pid)
+  *
+  * Best effort: failures are ignored.
+  */
++#ifdef HAVE_LIBSYSTEMD
+ static void reset_failed_unit(const char *unit)
+ {
+ 	sd_bus_error err = SD_BUS_ERROR_NULL;
+@@ -1763,6 +1778,12 @@ out:
+ 	sd_bus_error_free(&err);
+ 	sd_bus_unref(bus);
+ }
++#else
++static void reset_failed_unit(const char *unit)
++{
++	(void)unit;
++}
++#endif
+ 
+ /* ---------- attached-PID tracking ---------- */
+ 
+@@ -2405,6 +2426,7 @@ int process_cpuset_add_entry(process_cpuset_t *ctx, const char *name,
+  * via systemd's SetUnitProperties("runtime"=true). Best effort: a
+  * non-zero return is logged at the call site.
+  */
++#ifdef HAVE_LIBSYSTEMD
+ static int set_scope_allowed_cpus(const char *unit, const uint8_t *mask,
+ 				  size_t mask_len)
+ {
+@@ -2481,6 +2503,16 @@ out:
+ 	sd_bus_unref(bus);
+ 	return r < 0 ? -1 : 0;
+ }
++#else
++static int set_scope_allowed_cpus(const char *unit, const uint8_t *mask,
++				  size_t mask_len)
++{
++	(void)unit;
++	(void)mask;
++	(void)mask_len;
++	return -1;
++}
++#endif
+ 
+ /* Locate the attached_entry for @pid, NULL if not tracked. */
+ static struct attached_entry *attached_find_mut(process_cpuset_t *ctx,
+@@ -3634,6 +3666,7 @@ static int pid_in_entries(const process_cpuset_t *ctx, pid_t pid,
+ 
+ /* ---------- shutdown: stop transient scopes ---------- */
+ 
++#ifdef HAVE_LIBSYSTEMD
+ static int stop_scope_unit(const char *unit)
+ {
+ 	sd_bus_error err = SD_BUS_ERROR_NULL;
+@@ -3662,6 +3695,13 @@ out:
+ 	sd_bus_unref(bus);
+ 	return r < 0 ? -1 : 0;
+ }
++#else
++static int stop_scope_unit(const char *unit)
++{
++	(void)unit;
++	return -1;
++}
++#endif
+ 
+ int process_cpuset_stop_all(process_cpuset_t *ctx)
+ {
+-- 
+2.43.0
+

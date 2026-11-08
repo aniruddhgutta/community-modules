@@ -1,0 +1,37 @@
+From beb5bf7e7942b3ad78838bb84a8fedd3cef0cd1e Mon Sep 17 00:00:00 2001
+From: aniruddhgutta <aniruddhgutta@disroot.org>
+Date: Sun, 8 Nov 2026 16:57:42 +0530
+Subject: [PATCH] lpmd_proc: fix NULL pointer dereference in UPower device
+ enumeration
+
+up_client_get_devices2() can return NULL, but connect_to_upower_daemon()
+unconditionally dereferences the returned pointer when accessing devices->len.
+
+Check for NULL before iterating over the device array and skip device
+signal hookup if no array is returned.
+
+Fixes a potential segmentation fault in intel_lpmd.
+
+Signed-off-by: Aniruddh Gutta <aniruddhgutta@disroot.org>
+---
+ src/lpmd_proc.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/lpmd_proc.c b/src/lpmd_proc.c
+index 8f5c219..61ecce1 100644
+--- a/src/lpmd_proc.c
++++ b/src/lpmd_proc.c
+@@ -232,6 +232,10 @@ static void connect_to_upower_daemon(void)
+ 	g_signal_connect(upower_client, "notify", G_CALLBACK(upower_daemon_cb), NULL);
+ 
+ 	devices = up_client_get_devices2(upower_client);
++	if (!devices) {
++		g_warning("upowerd returned no devices, skipping device signal hookup");
++		return;
++	}
+ 	for (i = 0; i < devices->len; i++) {
+ 		device = g_ptr_array_index(devices, i);
+ 		g_signal_connect(device, "notify", G_CALLBACK(upower_daemon_cb), NULL);
+-- 
+2.43.0
+
